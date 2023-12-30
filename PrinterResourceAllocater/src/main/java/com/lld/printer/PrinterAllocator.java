@@ -1,70 +1,116 @@
 package com.lld.printer;
 
-import java.util.PriorityQueue;
-import java.util.concurrent.atomic.AtomicInteger;
+import java.util.ArrayList;
+import java.util.Collections;
+import java.util.List;
 import java.util.concurrent.locks.ReentrantLock;
 
 public class PrinterAllocator
 {
-    private AtomicInteger numPrinters;
-    private final Object lock = new Object();
-    private final ReentrantLock reentrantLock = new ReentrantLock();
-    private PriorityQueue<Integer> waitingProcesses;
+    private final ReentrantLock numLock = new ReentrantLock();
+    private int numPrinters;
+    private final Object waitLock = new Object();
+    
+    private final Object priorityLock = new Object();
+    
+    private final Object fastLock = new Object();
+    private final ReentrantLock mutexLock = new ReentrantLock();
+    private List<Integer> waitingProcesses;
     
     public void acquirePrinter(int pid) throws InterruptedException
     {
-        int nextVal = Math.max(0, numPrinters.get() - 1);
-        if(numPrinters.getAndSet(nextVal) > 0)
+        if(obtainPrinter())
         {
             System.out.println(String.format("The PID %d has obtained the printer", pid));
         }
         else
         {
             addToWaitingProcesses(pid);
-            while(numPrinters.get() == 0 || pid != waitingProcesses.peek())
+            while(numPrinters == 0 && pid != waitingProcesses.get(0))
             {
                 System.out.println(String.format("The PID %d is waiting for the printer", pid));
-                synchronized(lock)
+                synchronized(waitLock)
                 {
-                    lock.wait();
+                    waitLock.wait();
                 }
             }
-            numPrinters.decrementAndGet();
+            while(pid != waitingProcesses.get(0))
+            {
+                System.out.println(String.format("The PID %d is waiting to be processed", pid));
+                synchronized(priorityLock)
+                {
+                    priorityLock.wait();
+                }
+            }
+            while(numPrinters == 0)
+            {
+                System.out.println(String.format("The PID %d is waiting to be processed first", pid));
+                synchronized(fastLock)
+                {
+                    fastLock.wait();
+                }
+            }
             removeFromWaitingProcess();
+            obtainPrinter();
             System.out.println(String.format("The PID %d has obtained the printer after waiting", pid));
         }
     }
     
+    private boolean obtainPrinter()
+    {
+        numLock.lock();
+        int val = numPrinters;
+        numPrinters = Math.max(0, numPrinters - 1);
+        numLock.unlock();
+        if(val > 0)
+        {
+            return true;
+        }
+        return false;
+    }
+    
     private void removeFromWaitingProcess()
     {
-        reentrantLock.lock();
-        waitingProcesses.poll();
-        reentrantLock.unlock();
+        mutexLock.lock();
+        waitingProcesses.remove(0);
+        Collections.sort(waitingProcesses);
+        mutexLock.unlock();
     }
     
     private void addToWaitingProcesses(int pid)
     {
-        reentrantLock.lock();
+        mutexLock.lock();
         waitingProcesses.add(pid);
-        reentrantLock.unlock();
+        Collections.sort(waitingProcesses);
+        mutexLock.unlock();
     }
     
     public void releasePrinter(int pid, long millis) throws InterruptedException
     {
         Thread.sleep(millis);
         System.out.println(String.format("The PID %d has finished using the printer", pid));
-        numPrinters.incrementAndGet();
-        synchronized(lock)
+        numLock.lock();
+        ++numPrinters;
+        numLock.unlock();
+        synchronized(fastLock)
         {
-            lock.notifyAll();
+            fastLock.notifyAll();
+        }
+        synchronized(priorityLock)
+        {
+            priorityLock.notifyAll();
+        }
+        synchronized(waitLock)
+        {
+            waitLock.notifyAll();
         }
     }
     
     
     public void initialize(int numPrinters)
     {
-        this.numPrinters = new AtomicInteger(numPrinters);
-        this.waitingProcesses = new PriorityQueue<>();
+        this.numPrinters = numPrinters;
+        this.waitingProcesses = new ArrayList<>();
     }
     
     
